@@ -22,7 +22,6 @@ class TFminiPlusNode(Node):
 
         self.get_logger().info(f"TFmini Plus started on {port} @ {baud} baud")
 
-        # self.set_frame_rate(100)
         self.enable_output()
         self.set_frame_rate(100)
         self.timer = self.create_timer(self.timer_period, self.timer_callback)
@@ -47,13 +46,12 @@ class TFminiPlusNode(Node):
         self.serial.write(cmd)
         self.get_logger().info(f"Sent disable_output: {[hex(b) for b in cmd]}")
         time.sleep(1)
-        
+
     def set_frame_rate(self, hz: int):
-        # Frame rate is 2 bytes (little-endian)
-        payload = [
-            hz & 0xFF,
-            (hz >> 8) & 0xFF
-        ]
+        if hz < 1 or hz > 1000 or (1000 % hz != 0):
+            self.get_logger().warn("Invalid frame rate. Must divide 1000 exactly and be in 1~1000 Hz.")
+            return
+        payload = [hz & 0xFF, (hz >> 8) & 0xFF]
         cmd = self.make_command(0x03, payload)
         self.serial.write(cmd)
         self.get_logger().info(f"Sent frame rate set command: {[hex(b) for b in cmd]}")
@@ -61,28 +59,26 @@ class TFminiPlusNode(Node):
 
     def timer_callback(self):
         while self.serial.in_waiting >= 9:
-            b1 = self.serial.read(1)
-            if b1[0] != 0x59:
+            header = self.serial.read(2)
+            if header[0] != 0x59 or header[1] != 0x59:
                 continue
-            b2 = self.serial.read(1)
-            if b2[0] != 0x59:
-                continue
-            frame = b1 + b2 + self.serial.read(7)
+            frame = header + self.serial.read(7)
             if len(frame) != 9:
                 self.get_logger().warn("Incomplete frame")
                 return
-
             checksum = sum(frame[0:8]) & 0xFF
             if checksum != frame[8]:
                 self.get_logger().warn("Checksum mismatch")
                 return
-
-            distance_mm = frame[2] + (frame[3] << 8)
+            distance_cm = frame[2] + (frame[3] << 8)
+            strength = frame[4] + (frame[5] << 8)
+            if strength < 100 or strength == 65535:
+                self.get_logger().warn("Weak signal, ignoring frame")
+                return
             msg = Float32()
-            msg.data = distance_mm / 1000.0
+            msg.data = distance_cm / 100.0
             self.publisher_.publish(msg)
-            self.get_logger().debug(f"Published: {msg.data:.3f} m")
-            # self.get_logger().info(f"Published: {msg.data:.3f} m")
+            self.get_logger().debug(f"Published: {msg.data:.2f} m")
             break
 
     def destroy_node(self):
@@ -101,4 +97,3 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
